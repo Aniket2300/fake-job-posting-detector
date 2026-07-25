@@ -7,8 +7,10 @@ import shap
 import pytesseract
 from PIL import Image
 from scipy.sparse import hstack, csr_matrix
+import platform
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 st.set_page_config(page_title="Fake Job Detector", page_icon="🕵️", layout="wide")
 
