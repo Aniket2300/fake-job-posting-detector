@@ -3,6 +3,8 @@ import joblib
 import numpy as np
 import re
 import shap
+import pytesseract
+from PIL import Image
 from scipy.sparse import hstack, csr_matrix
 
 st.set_page_config(page_title="Fake Job Posting Detector", page_icon="🕵️", layout="centered")
@@ -39,9 +41,35 @@ def urgency_score(text):
 st.title("🕵️ Fake Job Posting Detector")
 st.caption("Paste a job posting below to check how likely it is to be fraudulent, with an explanation of why.")
 
+st.markdown("#### 📸 Or upload a screenshot")
+uploaded_image = st.file_uploader(
+    "Upload a screenshot of the job posting (PNG or JPG)",
+    type=["png", "jpg", "jpeg"],
+)
+
+if uploaded_image is not None:
+    try:
+        image = Image.open(uploaded_image)
+        with st.spinner("Reading text from image..."):
+            extracted_text = pytesseract.image_to_string(image).strip()
+        if extracted_text:
+            st.session_state["ocr_text"] = extracted_text
+            st.success("Text extracted below — please review and correct it before checking, since OCR isn't always perfect.")
+        else:
+            st.warning("Couldn't find any readable text in that image. Try a clearer screenshot, or paste the text manually below.")
+    except Exception as e:
+        st.error(f"Couldn't read that image: {e}")
+
+st.divider()
+
 with st.form("job_form"):
     title = st.text_input("Job Title", placeholder="e.g. Remote Data Entry Specialist")
-    description = st.text_area("Job Description", height=150, placeholder="Paste the full job description here...")
+    description = st.text_area(
+        "Job Description",
+        value=st.session_state.get("ocr_text", ""),
+        height=150,
+        placeholder="Paste the full job description here, or upload a screenshot above...",
+    )
     requirements = st.text_area("Requirements (optional)", height=80)
     company_profile = st.text_area("Company Profile (optional)", height=80)
 
@@ -96,8 +124,6 @@ if submitted:
         shap_values = explainer.shap_values(X_input)
 
         feature_names = tfidf.get_feature_names_out().tolist() + structured_features
-        contributions = list(zip(feature_names, shap_values[0]))
-        contributions.sort(key=lambda x: abs(x[1]), reverse=True)
 
         # Friendly names for the structured (non-text) signals
         friendly_names = {
@@ -107,6 +133,20 @@ if submitted:
             "has_salary": "a salary range listed",
             "has_company_profile": "a company profile/description",
         }
+
+        def is_present(feature):
+            if feature in friendly_names:
+                return bool(struct_vals[0][structured_features.index(feature)])
+            return feature in cleaned
+
+        contributions = [
+            (name, val, is_present(name)) for name, val in zip(feature_names, shap_values[0])
+        ]
+        # Words/details actually present in the posting are far more informative
+        # to a user than "doesn't use word X" (true of ~3000 possible words for
+        # any short posting), so rank present features first, then fall back to
+        # absent ones only to fill out the list.
+        contributions.sort(key=lambda x: (not x[2], -abs(x[1])))
 
         def describe(feature, value, present):
             """Turn a raw feature + SHAP value into a plain-English sentence."""
@@ -124,27 +164,17 @@ if submitted:
                 else:
                     return f"The posting does **not** use the word/phrase **\"{feature}\"**, which leans toward looking **{direction}**."
 
-        red_flags = [(name, val) for name, val in contributions if val > 0][:5]
-        reassuring = [(name, val) for name, val in contributions if val < 0][:3]
+        red_flags = [(name, val, present) for name, val, present in contributions if val > 0][:5]
+        reassuring = [(name, val, present) for name, val, present in contributions if val < 0][:3]
 
         if red_flags:
             st.markdown("**🚩 What made this look suspicious:**")
-            for name, val in red_flags:
-                if name in friendly_names:
-                    idx = structured_features.index(name)
-                    present = bool(struct_vals[0][idx])
-                else:
-                    present = name in cleaned
+            for name, val, present in red_flags:
                 st.write("- " + describe(name, val, present))
 
         if reassuring:
             st.markdown("**✅ What made this look legitimate:**")
-            for name, val in reassuring:
-                if name in friendly_names:
-                    idx = structured_features.index(name)
-                    present = bool(struct_vals[0][idx])
-                else:
-                    present = name in cleaned
+            for name, val, present in reassuring:
                 st.write("- " + describe(name, val, present))
 
         st.caption(
