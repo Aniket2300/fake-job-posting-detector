@@ -86,7 +86,14 @@ if submitted:
         st.markdown("### Why this prediction?")
 
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_input.toarray())
+        # Pass the sparse matrix directly (do NOT call .toarray()).
+        # XGBoost treats implicit zeros in a sparse matrix as "missing" — the same
+        # way it saw them during training — but an explicit 0.0 in a dense array
+        # is treated as a real observed value. Converting to dense silently changes
+        # what the model "sees" and produces a different (wrong) prediction, so the
+        # explanation ends up describing a different input than the one shown to
+        # the user. Keeping it sparse keeps this consistent with model.predict_proba().
+        shap_values = explainer.shap_values(X_input)
 
         feature_names = tfidf.get_feature_names_out().tolist() + structured_features
         contributions = list(zip(feature_names, shap_values[0]))
