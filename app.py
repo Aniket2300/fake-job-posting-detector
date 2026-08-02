@@ -70,11 +70,6 @@ if submitted:
             int(has_questions),
             int(salary_listed),
             int(bool(company_profile.strip())),
-            0,  # has_benefits (not collected in simple form)
-            int(bool(requirements.strip())),
-            len(description),
-            len(requirements),
-            urgency_score(cleaned),
         ]])
 
         text_vec = tfidf.transform([cleaned])
