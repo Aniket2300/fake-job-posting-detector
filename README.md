@@ -25,8 +25,10 @@ misleading metric here. The project instead focuses on precision, recall, and PR
 
 Since many job postings are shared as screenshots (WhatsApp, LinkedIn app, etc.) rather
 than plain text, the app supports uploading a screenshot directly. It uses Tesseract OCR
-to extract the text automatically, which then flows through the same detection pipeline
-as manually typed input — no separate model or logic needed.
+to extract the text automatically and pre-fills the description field, which the user can
+review and correct before submitting (OCR isn't always perfect). From there it flows
+through the same detection pipeline as manually typed input — no separate model or logic
+needed.
 
 ## Results
 
@@ -55,6 +57,16 @@ dataset) rather than purely generalizable fraud signals. This is a known risk wh
 on a single dataset, and the vocabulary was manually adjusted to exclude the clearest cases
 found during testing. A production system would need broader, more diverse training data
 to fully address this.
+
+In manual testing, this showed up as a false negative on a reshipping/banking-details style
+scam (asks for banking info and a "processing fee" up front): the model scored it at 40.2%
+fraud probability, below the 50% threshold, despite it matching several classic scam
+patterns. TF-IDF scores words independently and doesn't capture that certain *combinations*
+(e.g. asking for banking details + a fee together) are a stronger signal than either word
+alone — likely because this dataset underrepresents this particular scam style relative to
+more generic "urgent hiring, vague duties" scams. Addressing this would need either more
+training examples of this scam type or an engineered feature that explicitly flags requests
+for financial/banking information.
 
 ## Project Structure
 
