@@ -1,142 +1,160 @@
 import streamlit as st
 import joblib
-import re
-import html
 import numpy as np
+import re
 import shap
-import pytesseract
-from PIL import Image
+import matplotlib.pyplot as plt
 from scipy.sparse import hstack, csr_matrix
-import platform
 
-if platform.system() == "Windows":
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+st.set_page_config(page_title="Fake Job Posting Detector", page_icon="🕵️", layout="centered")
 
-st.set_page_config(page_title="Fake Job Detector", page_icon="🕵️", layout="wide")
+# ---------- Load artifacts ----------
+@st.cache_resource
+def load_artifacts():
+    model = joblib.load("model_xgb.joblib")
+    tfidf = joblib.load("tfidf_vectorizer.joblib")
+    structured_features = joblib.load("structured_cols.joblib")
+    return model, tfidf, structured_features
 
-model = joblib.load('model_xgb.joblib')
-tfidf = joblib.load('tfidf_vectorizer.joblib')
-structured_cols = joblib.load('structured_cols.joblib')
+model, tfidf, structured_features = load_artifacts()
 
-with st.sidebar:
-    st.header("About this project")
-    st.write(
-        "This tool uses a machine learning model (XGBoost) trained on 17,880 real "
-        "and fraudulent job postings to detect scam listings."
-    )
-    st.write("**Model performance:**")
-    st.write("- Precision: 82%")
-    st.write("- Recall: 82%")
-    st.write("- PR-AUC: 0.91")
-    st.markdown("---")
-    st.caption("Built by Aniket Jaiswal")
+URGENCY_WORDS = ['immediate', 'urgent', 'no experience', 'earn from home',
+                  'quick money', 'guaranteed', 'wire transfer', 'processing fee',
+                  'work from home', 'easy money', 'be your own boss']
 
+
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r'<.*?>', ' ', text)
+    text = re.sub(r'http\S+|www\S+', ' ', text)
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def urgency_score(text):
+    return sum(word in text for word in URGENCY_WORDS)
+
+
+# ---------- UI ----------
 st.title("🕵️ Fake Job Posting Detector")
-st.write("Paste a job posting below, or upload a screenshot instead.")
+st.caption("Paste a job posting below to check how likely it is to be fraudulent, with an explanation of why.")
 
-col_left, col_right = st.columns(2)
-with col_left:
-    title = st.text_input("Job Title")
-    description = st.text_area("Job Description", height=150)
-with col_right:
-    requirements = st.text_area("Requirements (optional)", height=100)
-    company_profile = st.text_area("Company Profile (optional)", height=100)
+with st.form("job_form"):
+    title = st.text_input("Job Title", placeholder="e.g. Remote Data Entry Specialist")
+    description = st.text_area("Job Description", height=150, placeholder="Paste the full job description here...")
+    requirements = st.text_area("Requirements (optional)", height=80)
+    company_profile = st.text_area("Company Profile (optional)", height=80)
 
-st.markdown("---")
-st.write("**Or upload a screenshot of the job posting instead:**")
-uploaded_image = st.file_uploader("Upload screenshot", type=["png", "jpg", "jpeg"])
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        has_logo = st.checkbox("Company logo present?", value=True)
+    with col2:
+        has_questions = st.checkbox("Screening questions included?")
+    with col3:
+        telecommuting = st.checkbox("Remote / telecommuting role?")
 
-ocr_text = ""
-if uploaded_image is not None:
-    image = Image.open(uploaded_image)
-    st.image(image, caption="Uploaded screenshot", width=350)
-    extracted_text = pytesseract.image_to_string(image)
-    ocr_text = st.text_area("Extracted text (edit if needed)", value=extracted_text, height=150, key="ocr_text")
+    salary_listed = st.checkbox("Salary range listed?")
 
-st.markdown("---")
-st.write("**Additional signals:**")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    has_logo = st.checkbox("Company logo present?")
-with col2:
-    has_questions = st.checkbox("Screening questions included?")
-with col3:
-    telecommuting = st.checkbox("Remote / telecommuting role?")
-with col4:
-    has_salary = st.checkbox("Salary range listed?")
+    submitted = st.form_submit_button("Check Posting")
 
-st.markdown("---")
-
-if st.button("🔍 Check Posting", use_container_width=True):
-    combined_typed_text = ' '.join([title, company_profile, description, requirements]).strip()
-
-    if ocr_text.strip():
-        source_text = combined_typed_text + ' ' + ocr_text
+if submitted:
+    if not description.strip():
+        st.warning("Please paste a job description to analyze.")
     else:
-        source_text = combined_typed_text
-
-    if not source_text.strip():
-        st.warning("Please enter a job description or upload a screenshot.")
-    else:
-        def clean_text(text):
-            text = html.unescape(text)
-            text = text.lower()
-            text = re.sub(r'<.*?>', ' ', text)
-            text = re.sub(r'http\S+|www\S+', ' ', text)
-            text = re.sub(r'[^a-z\s]', ' ', text)
-            text = re.sub(r'\s+', ' ', text).strip()
-            return text
-
-        cleaned = clean_text(source_text)
+        full_text = " ".join([title, company_profile, description, requirements])
+        cleaned = clean_text(full_text)
 
         struct_vals = np.array([[
             int(telecommuting),
             int(has_logo),
             int(has_questions),
-            int(has_salary),
+            int(salary_listed),
             int(bool(company_profile.strip())),
+            0,  # has_benefits (not collected in simple form)
+            int(bool(requirements.strip())),
+            len(description),
+            len(requirements),
+            urgency_score(cleaned),
         ]])
 
         text_vec = tfidf.transform([cleaned])
         X_input = hstack([text_vec, csr_matrix(struct_vals)])
 
         proba = model.predict_proba(X_input)[0, 1]
+        pred = "🚩 Likely Fraudulent" if proba >= 0.5 else "✅ Likely Real"
 
-        result_col1, result_col2 = st.columns([1, 2])
-        with result_col1:
-            st.metric("Fraud Probability", f"{proba*100:.1f}%")
-        with result_col2:
-            if proba >= 0.5:
-                st.error("🚩 This looks potentially fraudulent.")
-            else:
-                st.success("✅ This looks like a real posting.")
+        st.subheader(pred)
+        st.metric("Fraud Probability", f"{proba*100:.1f}%")
+        st.progress(min(int(proba * 100), 100))
 
+        # ---------- Explainability ----------
         st.markdown("### Why this prediction?")
 
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_input.toarray())
 
-        feature_names = tfidf.get_feature_names_out().tolist() + structured_cols
+        feature_names = tfidf.get_feature_names_out().tolist() + structured_features
         contributions = list(zip(feature_names, shap_values[0]))
         contributions.sort(key=lambda x: abs(x[1]), reverse=True)
 
-        red_flags = [name for name, val in contributions if val > 0][:5]
-        reassuring = [name for name, val in contributions if val < 0][:3]
+        # Friendly names for the structured (non-text) signals
+        friendly_names = {
+            "telecommuting": "this being a remote/work-from-home role",
+            "has_company_logo": "a company logo",
+            "has_questions": "screening questions for applicants",
+            "has_salary": "a salary range listed",
+            "has_company_profile": "a company profile/description",
+        }
 
-        exp_col1, exp_col2 = st.columns(2)
+        def describe(feature, value, present):
+            """Turn a raw feature + SHAP value into a plain-English sentence."""
+            direction = "fraudulent" if value > 0 else "legitimate"
 
-        with exp_col1:
-            st.markdown("#### 🚩 Signals toward *fraudulent*")
-            with st.container(border=True):
-                for flag in red_flags:
-                    present = flag in cleaned
-                    status = "found in text" if present else "notably absent"
-                    st.write(f"- *{flag}* ({status})")
+            if feature in friendly_names:
+                label = friendly_names[feature]
+                if present:
+                    return f"This posting **has {label}**, which leans toward looking **{direction}**."
+                else:
+                    return f"This posting is **missing {label}**, which leans toward looking **{direction}**."
+            else:
+                if present:
+                    return f"The posting uses the word/phrase **\"{feature}\"**, which leans toward looking **{direction}**."
+                else:
+                    return f"The posting does **not** use the word/phrase **\"{feature}\"**, which leans toward looking **{direction}**."
 
-        with exp_col2:
-            st.markdown("#### ✅ Signals toward *legitimate*")
-            with st.container(border=True):
-                for sign in reassuring:
-                    present = sign in cleaned
-                    status = "found in text" if present else "notably absent"
-                    st.write(f"- *{sign}* ({status})")
+        red_flags = [(name, val) for name, val in contributions if val > 0][:5]
+        reassuring = [(name, val) for name, val in contributions if val < 0][:3]
+
+        if red_flags:
+            st.markdown("**🚩 What made this look suspicious:**")
+            for name, val in red_flags:
+                if name in friendly_names:
+                    idx = structured_features.index(name)
+                    present = bool(struct_vals[0][idx])
+                else:
+                    present = name in cleaned
+                st.write("- " + describe(name, val, present))
+
+        if reassuring:
+            st.markdown("**✅ What made this look legitimate:**")
+            for name, val in reassuring:
+                if name in friendly_names:
+                    idx = structured_features.index(name)
+                    present = bool(struct_vals[0][idx])
+                else:
+                    present = name in cleaned
+                st.write("- " + describe(name, val, present))
+
+        st.caption(
+            "This explanation shows the words and details that most influenced the model's "
+            "decision — both ones that were present in the posting, and ones that were "
+            "notably missing."
+        )
+
+st.divider()
+st.caption(
+    "Built as a portfolio project. Model: XGBoost trained on the Kaggle "
+    "'Real or Fake Job Posting Prediction' dataset. Not a substitute for your own judgment — "
+    "always verify suspicious postings independently."
+)
